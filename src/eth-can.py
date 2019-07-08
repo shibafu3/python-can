@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+# -*- coding:utf-8 -*-
+import sys
+import socket
+import can
+import RPi.GPIO as GPIO
+
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(21, GPIO.OUT)
+GPIO.output(21, 1)
+
+host = "192.168.5.10" #お使いのサーバーのホスト名を入れます
+port = 19227          #クライアントと同じPORTをしてあげます
+
+
+serversock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)   # TCP通信用にソケットを設定
+serversock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 2)  # ソケットのオプション
+serversock.bind((host,port)) #IPとPORTを指定してバインドします
+serversock.listen(10) #接続の待ち受けをします（キューの最大数を指定）
+print('Waiting for client connections...')
+clientsock, client_address = serversock.accept() #接続されればデータを格納
+print('connected')
+GPIO.output(21, 0)
+
+# CANの初期化
+bus = can.interface.Bus(channel = 'can0', bustype='socketcan_native', bitrate=500000, canfilters=None)
+
+# CANのコールバッククラスを定義
+# can.Listenerクラスのon_message_received関数をオーバーライドする
+class CallBackFunction(can.Listener):
+    def on_message_received(self, msg):
+        eth_send_msg = 'M SD' + str(msg.dlc) + ' ' + format(msg.arbitration_id, 'X').zfill(3) + ' '
+
+        for i in range(msg.dlc) :
+            eth_send_msg = eth_send_msg + format(msg.data[i], 'X').zfill(2) + ' '
+
+        for i in range(8 - msg.dlc) :
+            eth_send_msg = eth_send_msg + '00 '
+
+        eth_send_msg = eth_send_msg + '\r\n'
+
+#        print(eth_send_msg)
+
+        try :
+            clientsock.send(eth_send_msg.encode())
+        except OSError :
+            clientsock.close()
+            serversock.close()
+            GPIO.output(21, 1)
+            sys.exit()
+        except ConnectionResetError :
+            clientsock.close()
+            serversock.close()
+            GPIO.output(21, 1)
+            sys.exit()
+
+call_back_function = CallBackFunction()
+can.Notifier(bus, [call_back_function, ])
+
+data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+can_send_msg = can.Message(extended_id=False, arbitration_id=0x1, dlc=8, data=data)
+eth_recv_msg = 'M SD8 123 01 23 45 67 89 AB CD EF \r\n'
+can_itr = 0
+
+
+prev1 = 0
+prev2 = 0
+prev3 = 0
+
+while True:
+    while True:
+        try :
+            one_char= clientsock.recv(1)
+#            print(one_char)
+            if one_char == b'M':
+                can_itr = 0
+
+            eth_recv_msg = str(eth_recv_msg)[:can_itr] + one_char.decode('UTF-8') + str(eth_recv_msg)[can_itr+1:]
+
+            can_itr = can_itr + 1
+#            print(one_char, can_itr)
+            if (one_char == b'\n') and (can_itr == 36):
+                eth_recv_msgs = eth_recv_msg.split(' ')
+
+                can_send_msg.dlc = int(eth_recv_msgs[1][2])
+                can_send_msg.arbitration_id = int(eth_recv_msgs[2], 16)
+                can_send_msg.data[0] = int(eth_recv_msgs[3], 16)
+                can_send_msg.data[1] = int(eth_recv_msgs[4], 16)
+                can_send_msg.data[2] = int(eth_recv_msgs[5], 16)
+                can_send_msg.data[3] = int(eth_recv_msgs[6], 16)
+                can_send_msg.data[4] = int(eth_recv_msgs[7], 16)
+                can_send_msg.data[5] = int(eth_recv_msgs[8], 16)
+                can_send_msg.data[6] = int(eth_recv_msgs[9], 16)
+                can_send_msg.data[7] = int(eth_recv_msgs[10], 16)
+
+               # bus.flush_tx_buffer()
+                try :
+                    bus.send(can_send_msg)
+                except OSError :
+                    print('buffer error')
+                    bus.flush_tx_buffer()
+                can_itr = 0
+
+
+            if can_itr > 36:
+              can_itr = 0
+
+        except KeyboardInterrupt :
+            clientsock.close()
+            serversock.close()
+            GPIO.output(21, 1)
+            sys.exit()
+
+        except ConnectionResetError :
+            clientsock.close()
+            GPIO.output(21, 1)
+            print('client is disconnected')
+            print('Waiting for next connections...')
+            clientsock, client_address = serversock.accept() #接続されればデータを格納
+            GPIO.output(21, 0)
+
+        except :
+            clientsock.close()
+            serversock.close()
+            GPIO.output(21, 1)
+            sys.exit()
+
+    clientsock.close()
+    GPIO.output(21, 1)
+    print('client is disconnected')
+    print('Waiting for next connections...')
+    clientsock, client_address = serversock.accept() #接続されればデータを格納
+    GPIO.output(21, 0)
+
+
+clientsock.close()
+serversock.close()
